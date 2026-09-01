@@ -1,13 +1,13 @@
 {
   "name": "markdown-docs",
-  "displayName": "Markdown Docs & Comments",
+  "displayName": "Markdown Docs & Comments (Cobli)",
   "description": "WYSIWYG Markdown Editor with Inline Commenting (great for working with AI!)",
   "version": "1.3.1",
   "icon": "media/icon.png",
-  "publisher": "jonnyasmar",
+  "publisher": "cobli",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jonnyasmar/markdown-docs"
+    "url": "https://github.com/Cobliteam/markdown-docs"
   },
   "sponsor": {
     "url": "https://buymeacoffee.com/jonnygravity"
