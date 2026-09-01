@@ -35,27 +35,6 @@ export const MermaidEditor: React.FC<MermaidEditorProps> = ({
   const mermaidRef = useRef<HTMLDivElement>(null);
   const splitContainerRef = useRef<HTMLDivElement>(null);
 
-  // SVG sanitization function to prevent XSS
-  const sanitizeSVG = useCallback((svg: string): string => {
-    if (!svg || typeof svg !== 'string') {
-      return '';
-    }
-
-    return (
-      svg
-        // Remove script tags and their content
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-        // Remove event handlers (onclick, onload, etc.)
-        .replace(/on\w+=["'][^"']*["']/gi, '')
-        // Remove javascript: protocols
-        .replace(/javascript:/gi, '')
-        // Remove data: protocols except for safe image formats
-        .replace(/data:(?!image\/(png|jpg|jpeg|gif|svg|webp))[^;]*;/gi, '')
-        // Remove suspicious attributes
-        .replace(/\s*(href|src)=["'][^"']*javascript:[^"']*["']/gi, '')
-    );
-  }, []);
-
   // Optimized mermaid rendering with security and performance improvements
   const renderMermaid = useCallback(async () => {
     if (!code.trim()) {
@@ -74,11 +53,11 @@ export const MermaidEditor: React.FC<MermaidEditorProps> = ({
       // Render with fresh ID
       const { svg } = await mermaid.render(newDiagramId, code);
 
-      // Sanitize SVG content before setting it
-      let sanitizedSVG = sanitizeSVG(svg);
-
-      // Debug: Log the SVG content to see what's being generated
-      console.log('Generated SVG sample:', svg.substring(0, 500));
+      // Mermaid sanitises diagram text with DOMPurify when securityLevel is 'strict',
+      // which is the configuration used below. Regex post-processing was removed: it
+      // could not reliably strip unquoted event handlers or encoded javascript: URLs,
+      // and gave the impression of a control that was not actually there.
+      let renderedSVG = svg;
 
       // Inject theme-specific CSS directly into the SVG to override hardcoded colors
       const themeCSS = isDarkTheme
@@ -122,11 +101,11 @@ export const MermaidEditor: React.FC<MermaidEditorProps> = ({
       `;
 
       // Inject CSS into SVG
-      if (sanitizedSVG.includes('<svg')) {
-        sanitizedSVG = sanitizedSVG.replace(/<svg([^>]*)>/, `<svg$1>${themeCSS}`);
+      if (renderedSVG.includes('<svg')) {
+        renderedSVG = renderedSVG.replace(/<svg([^>]*)>/, `<svg$1>${themeCSS}`);
       }
 
-      setSvgContent(sanitizedSVG);
+      setSvgContent(renderedSVG);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (err: any) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
@@ -138,7 +117,7 @@ export const MermaidEditor: React.FC<MermaidEditorProps> = ({
       // Log error for debugging but don't expose sensitive information
       logger.error('Mermaid rendering failed:', errorMessage);
     }
-  }, [code, sanitizeSVG, isDarkTheme]);
+  }, [code, isDarkTheme]);
 
   // Initialize mermaid with proper theme configuration
   useEffect(() => {
@@ -179,7 +158,10 @@ export const MermaidEditor: React.FC<MermaidEditorProps> = ({
     mermaid.initialize({
       startOnLoad: false,
       theme: isDarkTheme ? 'dark' : 'default',
-      securityLevel: 'loose',
+      // 'strict' keeps mermaid's DOMPurify pass over diagram text and disables click
+      // directives, whose href is passed through unsanitised in 'loose'. Markdown files
+      // are untrusted input, so diagrams must not be able to inject markup or links.
+      securityLevel: 'strict',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       //themeVariables: themeConfig,
       // Force fresh configuration - no caching
