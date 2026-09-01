@@ -1,6 +1,7 @@
+import * as crypto from 'crypto';
+import * as nodeEmoji from 'node-emoji';
 import * as path from 'path';
 
-import * as nodeEmoji from 'node-emoji';
 import * as vscode from 'vscode';
 
 import { logger } from './utils/logger';
@@ -40,6 +41,9 @@ interface WebviewMessage {
 
 // Global registry to track user interaction state that should block incoming changes
 const userInteractionRegistry = new Set<string>();
+
+// Extensions accepted when copying an existing image into the document's media folder.
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.bmp', '.ico']);
 
 /**
  * Custom text editor provider for markdown documents with integrated webview
@@ -87,8 +91,10 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
       // Configure webview
       webviewPanel.webview.options = {
         enableScripts: true,
-        localResourceRoots: [vscode.Uri.file('/'), ...this.getFolders()],
-        enableCommandUris: true,
+        // Only the extension bundle, the workspace and the document's own folder are
+        // reachable. Markdown files are untrusted input, so the webview must not be
+        // able to address the whole filesystem.
+        localResourceRoots: this.getResourceRoots(document),
       };
 
       this.outputChannel.appendLine('Step 3: Setting webview HTML');
@@ -180,12 +186,40 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
     }
   }
 
-  private getFolders(): vscode.Uri[] {
-    const data = [];
-    for (let i = 65; i <= 90; i++) {
-      data.push(vscode.Uri.file(`${String.fromCharCode(i)}:/`));
+  /**
+   * Local resources the webview is allowed to load: the extension itself, the open
+   * workspace folders, and the directory holding the current document (which covers
+   * files opened outside any workspace).
+   */
+  private getResourceRoots(document: vscode.TextDocument): vscode.Uri[] {
+    const roots: vscode.Uri[] = [this.context.extensionUri];
+
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      roots.push(folder.uri);
     }
-    return data;
+
+    if (document.uri.scheme === 'file') {
+      roots.push(vscode.Uri.joinPath(document.uri, '..'));
+    }
+
+    return roots;
+  }
+
+  /**
+   * True when `target` is contained in one of the roots the webview may address.
+   * Used to keep webview-supplied paths from escaping the workspace.
+   */
+  private isWithinAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): boolean {
+    if (target.scheme !== 'file') {
+      return false;
+    }
+
+    return this.getResourceRoots(document)
+      .filter(root => root.scheme === 'file')
+      .some(root => {
+        const relative = path.relative(root.fsPath, target.fsPath);
+        return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+      });
   }
 
   private setupWebviewMessageHandling(document: vscode.TextDocument, webviewPanel: vscode.WebviewPanel): void {
@@ -431,26 +465,27 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
               const documentUri = vscode.Uri.joinPath(documentDir, message.relativePath);
 
               let opened = false;
-              try {
-                await vscode.workspace.fs.stat(workspaceUri);
-                this.outputChannel.appendLine(`Opening local file (workspace): ${workspaceUri.toString()}`);
-                await vscode.commands.executeCommand('vscode.open', workspaceUri);
-                opened = true;
-              } catch {
+              // joinPath normalises '..', so a link like '../../../etc/passwd' escapes the
+              // root it was joined to. Only open targets that stay inside an allowed root.
+              for (const candidate of [workspaceUri, documentUri]) {
+                if (!this.isWithinAllowedRoots(document, candidate)) {
+                  this.outputChannel.appendLine(`Refusing link outside allowed roots: ${candidate.toString()}`);
+                  continue;
+                }
                 try {
-                  await vscode.workspace.fs.stat(documentUri);
-                  this.outputChannel.appendLine(`Opening local file (document-relative): ${documentUri.toString()}`);
-                  await vscode.commands.executeCommand('vscode.open', documentUri);
+                  await vscode.workspace.fs.stat(candidate);
+                  this.outputChannel.appendLine(`Opening local file: ${candidate.toString()}`);
+                  await vscode.commands.executeCommand('vscode.open', candidate);
                   opened = true;
+                  break;
                 } catch {
-                  // Not a local file
+                  // Not a local file, try the next candidate
                 }
               }
 
-              // If not found locally, open as external URL in browser
+              // If not found locally, open as external URL in the browser
               if (!opened && message.url) {
-                this.outputChannel.appendLine(`Opening external link: ${message.url}`);
-                await vscode.env.openExternal(vscode.Uri.parse(message.url));
+                await this.openExternalLink(message.url);
               }
             }
             break;
@@ -479,6 +514,39 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
       }
       this.outputChannel.appendLine(`=== MESSAGE HANDLER END ===`);
     });
+  }
+
+  /**
+   * Open a link from the document in the user's browser. Only web and mail schemes are
+   * handed to the OS directly: schemes such as file:, smb: or vscode: would let markdown
+   * content invoke local handlers, so those require explicit confirmation.
+   */
+  private async openExternalLink(rawUrl: string): Promise<void> {
+    const SAFE_SCHEMES = ['http', 'https', 'mailto'];
+
+    let target: vscode.Uri;
+    try {
+      target = vscode.Uri.parse(rawUrl, true);
+    } catch {
+      this.outputChannel.appendLine(`Refusing to open unparseable link: ${rawUrl}`);
+      return;
+    }
+
+    if (!SAFE_SCHEMES.includes(target.scheme.toLowerCase())) {
+      const open = 'Open anyway';
+      const choice = await vscode.window.showWarningMessage(
+        `This link uses the "${target.scheme}" scheme, which can launch an external application.`,
+        { modal: true, detail: rawUrl },
+        open,
+      );
+      if (choice !== open) {
+        this.outputChannel.appendLine(`User declined non-web link: ${rawUrl}`);
+        return;
+      }
+    }
+
+    this.outputChannel.appendLine(`Opening external link: ${target.scheme}:`);
+    await vscode.env.openExternal(target);
   }
 
   private async handleCommentOperation(message: WebviewMessage, document: vscode.TextDocument): Promise<void> {
@@ -522,7 +590,16 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
     const config = vscode.workspace.getConfiguration('markdown-docs');
     const folderSetting = config.get<string>('imagePasteFolder', 'media').trim();
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = folderSetting ? vscode.Uri.joinPath(documentDir, folderSetting) : documentDir;
+    let targetDir = folderSetting ? vscode.Uri.joinPath(documentDir, folderSetting) : documentDir;
+
+    // imagePasteFolder can come from workspace settings, i.e. from the repository being
+    // opened. joinPath normalises '..', so an unchecked value writes outside the project.
+    if (!this.isWithinAllowedRoots(document, targetDir)) {
+      this.outputChannel.appendLine(
+        `imagePasteFolder "${folderSetting}" resolves outside the workspace; saving next to the document instead`,
+      );
+      targetDir = documentDir;
+    }
 
     let bytes: Uint8Array | undefined;
     let baseName: string | undefined;
@@ -609,6 +686,17 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     for (const candidate of candidates) {
+      // The candidate may come from clipboard data controlled by whatever page the user
+      // copied from, so validate the *resolved* path rather than the raw string: a URI
+      // fragment ('…/id_rsa#.png') passes a suffix check but resolves elsewhere.
+      if (!this.isWithinAllowedRoots(document, candidate)) {
+        this.outputChannel.appendLine(`Ignoring image source outside allowed roots: ${candidate.fsPath}`);
+        continue;
+      }
+      if (!IMAGE_EXTENSIONS.has(path.extname(candidate.fsPath).toLowerCase())) {
+        this.outputChannel.appendLine(`Ignoring image source with non-image extension: ${candidate.fsPath}`);
+        continue;
+      }
       if (await this.fileExists(candidate)) {
         return candidate;
       }
@@ -738,8 +826,9 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
     const scriptUri = toUri('dist/webview-ui/index.js');
     const styleUri = toUri('dist/webview-ui/index.css');
 
-    // Generate a unique nonce for this webview instance
-    const nonce = Math.random().toString(36).substring(2, 15);
+    // Generate a unique nonce for this webview instance. Must be cryptographically
+    // random: a guessable nonce lets injected markup satisfy the CSP.
+    const nonce = crypto.randomBytes(16).toString('base64');
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -747,7 +836,7 @@ class MarkdownTextEditorProvider implements vscode.CustomTextEditorProvider {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <base href="${baseHref}">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: http: data: blob:; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; script-src 'nonce-${nonce}' 'unsafe-eval'; font-src ${webview.cspSource} https://fonts.gstatic.com;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} https: data: blob:; style-src ${webview.cspSource} 'unsafe-inline' https://fonts.googleapis.com; script-src 'nonce-${nonce}'; font-src ${webview.cspSource} https://fonts.gstatic.com;">
   <link href="${styleUri.toString()}" rel="stylesheet">
   <title>Markdown Docs</title>
 </head>
