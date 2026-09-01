@@ -1,5 +1,16 @@
 # Markdown Docs: Your Ultimate Markdown Companion
 
+> **Cobli fork.** This is an internal build of
+> [jonnyasmar/markdown-docs](https://github.com/jonnyasmar/markdown-docs), published as
+> `cobli.markdown-docs` so it does not collide with the Marketplace release. It exists to
+> carry security fixes to the webview ahead of upstream: command URIs are disabled, the
+> webview's local resource roots are scoped to the workspace, paths supplied by the webview
+> are validated before being read or opened, and mermaid renders with `securityLevel: strict`.
+> See the `fix/webview-security-hardening` branch for the changes on their own.
+>
+> Everything below is the upstream README. All credit for the extension goes to its author;
+> the original MIT licence and copyright notice are unchanged in `LICENSE`.
+
 ---
 
 **Transform your Markdown workflow with Markdown Docs, a powerful VS Code extension designed for a seamless and intuitive document review and commenting experience.**
