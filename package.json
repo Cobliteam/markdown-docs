@@ -209,7 +209,7 @@
     "webpack-cli": "^5.0.0"
   },
   "dependencies": {
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.2",
     "lexical": "^0.35.0",
     "mdast-util-directive": "^3.1.0",
     "mdast-util-frontmatter": "^2.0.1",
